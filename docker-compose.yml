@@ -1,0 +1,79 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    container_name: odoo_db
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${POSTGRES_DB:-odoo}
+      - POSTGRES_USER=${POSTGRES_USER:-odoo}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - PGDATA=/var/lib/postgresql/data/pgdata
+    volumes:
+      - odoo-db-data:/var/lib/postgresql/data/pgdata
+    networks:
+      - odoo-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-odoo}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  odoo:
+    image: odoo:${ODOO_VERSION:-17.0}
+    container_name: odoo_app
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      - HOST=${DB_HOST:-db}
+      - USER=${POSTGRES_USER:-odoo}
+      - PASSWORD=${POSTGRES_PASSWORD}
+    volumes:
+      - odoo-web-data:/var/lib/odoo
+      - ./addons:/mnt/extra-addons
+      - ./config:/etc/odoo
+    networks:
+      - odoo-network
+      - traefik-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-network"
+
+      # HTTP Router
+      - "traefik.http.routers.odoo.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.odoo.entrypoints=websecure"
+      - "traefik.http.routers.odoo.tls=true"
+      - "traefik.http.routers.odoo.tls.certresolver=letsencrypt"
+
+      # Service
+      - "traefik.http.services.odoo.loadbalancer.server.port=8069"
+
+      # Longpolling (para chat en tiempo real de Odoo)
+      - "traefik.http.routers.odoo-longpolling.rule=Host(`${DOMAIN}`) && PathPrefix(`/longpolling`)"
+      - "traefik.http.routers.odoo-longpolling.entrypoints=websecure"
+      - "traefik.http.routers.odoo-longpolling.tls=true"
+      - "traefik.http.routers.odoo-longpolling.tls.certresolver=letsencrypt"
+      - "traefik.http.services.odoo-longpolling.loadbalancer.server.port=8072"
+
+      # Middlewares para seguridad
+      - "traefik.http.middlewares.odoo-headers.headers.customResponseHeaders.X-Frame-Options=SAMEORIGIN"
+      - "traefik.http.middlewares.odoo-headers.headers.customResponseHeaders.X-Content-Type-Options=nosniff"
+      - "traefik.http.middlewares.odoo-headers.headers.sslRedirect=true"
+      - "traefik.http.routers.odoo.middlewares=odoo-headers@docker"
+
+networks:
+  odoo-network:
+    name: odoo-network
+    driver: bridge
+  traefik-network:
+    name: traefik-network
+    external: true
+
+volumes:
+  odoo-web-data:
+    name: odoo-web-data
+  odoo-db-data:
+    name: odoo-db-data
