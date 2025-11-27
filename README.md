@@ -83,6 +83,9 @@ make restart
 
 # Detener
 make stop
+
+# Reset completo (elimina datos)
+./reset-deployment.sh
 ```
 
 ## Módulos OCA
