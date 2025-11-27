@@ -4,7 +4,7 @@ Configuración completa de Odoo con Traefik como reverse proxy, SSL automático 
 
 ## Características
 
-- **Traefik v3.2**: Reverse proxy con SSL automático via Let's Encrypt
+- **Traefik v3.6.2**: Reverse proxy con SSL automático via Let's Encrypt
 - **Odoo 17.0/18.0/19.0**: Selecciona la versión que necesites
 - **PostgreSQL 15**: Base de datos robusta y optimizada
 - **Módulos OCA**: Carpeta `addons/` lista para módulos personalizados
