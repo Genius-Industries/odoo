@@ -23,6 +23,7 @@ providers:
     endpoint: "unix:///var/run/docker.sock"
     exposedByDefault: false
     network: traefik-network
+    watch: true
 
   file:
     directory: /dynamic
