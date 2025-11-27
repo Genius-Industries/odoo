@@ -15,12 +15,12 @@ Minimum supported API version is 1.44, please upgrade your client to a newer ver
 - Traefik v3.2 inicial tenía issues con Docker API 1.44+
 
 ### Solución
-**Opción 1: Usar Traefik v3.2.3+ (Recomendado)**
+**Opción 1: Usar Traefik v3.6.2+ (Recomendado)**
 ```yaml
 # docker-compose.traefik.yml
 services:
   traefik:
-    image: traefik:v3.2.3  # o superior
+    image: traefik:v3.6.2  # última versión estable
 ```
 
 **Opción 2: Downgrade Docker (No recomendado)**
