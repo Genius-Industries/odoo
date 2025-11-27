@@ -28,12 +28,21 @@ fi
 echo "🔒 Configurando permisos de acme.json..."
 chmod 600 traefik/acme.json
 
-# Crear red de Traefik si no existe
-if ! docker network inspect traefik-network >/dev/null 2>&1; then
+# Verificar y crear/recrear red de Traefik
+if docker network inspect traefik-network >/dev/null 2>&1; then
+    # Verificar si la red tiene labels incorrectos
+    NETWORK_LABEL=$(docker network inspect traefik-network --format '{{index .Labels "com.docker.compose.network"}}' 2>/dev/null || echo "")
+    if [ ! -z "$NETWORK_LABEL" ]; then
+        echo "🔄 Recreando red traefik-network (limpiando labels antiguos)..."
+        docker network rm traefik-network >/dev/null 2>&1 || true
+        docker network create traefik-network
+        echo "✅ Red traefik-network recreada"
+    else
+        echo "✅ Red traefik-network ya existe"
+    fi
+else
     echo "🌐 Creando red traefik-network..."
     docker network create traefik-network
-else
-    echo "✅ Red traefik-network ya existe"
 fi
 
 # Cargar variables de entorno

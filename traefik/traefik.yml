@@ -35,15 +35,15 @@ certificatesResolvers:
       storage: acme.json
       # Usa el DNS challenge para dominios con Cloudflare
       # Si no usas Cloudflare, cambia a httpChallenge
-      dnsChallenge:
-        provider: cloudflare
-        resolvers:
-          - "1.1.1.1:53"
-          - "8.8.8.8:53"
+      #dnsChallenge:
+        #provider: cloudflare
+        #resolvers:
+          #- "1.1.1.1:53"
+          #- "8.8.8.8:53"
 
       # Alternativa: HTTP Challenge (comentar dnsChallenge arriba)
-      # httpChallenge:
-      #   entryPoint: web
+      httpChallenge:
+        entryPoint: web
 
 log:
   level: INFO
