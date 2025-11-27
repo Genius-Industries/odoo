@@ -33,11 +33,13 @@ PostgreSQL (Port 5432)
 # Clonar/usar este repositorio
 cd /path/to/odoo
 
-# Copiar y editar variables de entorno
+# Opción A: Setup interactivo (RECOMENDADO)
+./setup-env.sh
+
+# Opción B: Manual
 cp .env.example .env
 nano .env
-
-# Configurar dominio, passwords, email SSL, etc.
+# Configurar: DOMAIN, ACME_EMAIL, POSTGRES_PASSWORD, etc.
 ```
 
 ### 2. Deployment
