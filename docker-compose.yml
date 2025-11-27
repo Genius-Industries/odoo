@@ -40,21 +40,26 @@ services:
       - "traefik.enable=true"
       - "traefik.docker.network=traefik-network"
 
-      # HTTP Router
+      # HTTP Router - Web Interface
       - "traefik.http.routers.odoo.rule=Host(`${DOMAIN}`)"
       - "traefik.http.routers.odoo.entrypoints=websecure"
       - "traefik.http.routers.odoo.tls=true"
       - "traefik.http.routers.odoo.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.odoo.service=odoo-web"
 
-      # Service
-      - "traefik.http.services.odoo.loadbalancer.server.port=8069"
+      # Service - Web Interface
+      - "traefik.http.services.odoo-web.loadbalancer.server.port=8069"
 
-      # Longpolling (para chat en tiempo real de Odoo)
+      # Router - Longpolling (para chat en tiempo real de Odoo)
       - "traefik.http.routers.odoo-longpolling.rule=Host(`${DOMAIN}`) && PathPrefix(`/longpolling`)"
       - "traefik.http.routers.odoo-longpolling.entrypoints=websecure"
       - "traefik.http.routers.odoo-longpolling.tls=true"
       - "traefik.http.routers.odoo-longpolling.tls.certresolver=letsencrypt"
-      - "traefik.http.services.odoo-longpolling.loadbalancer.server.port=8072"
+      - "traefik.http.routers.odoo-longpolling.service=odoo-polling"
+      - "traefik.http.routers.odoo-longpolling.priority=100"
+
+      # Service - Longpolling
+      - "traefik.http.services.odoo-polling.loadbalancer.server.port=8072"
 
       # Middlewares para seguridad
       - "traefik.http.middlewares.odoo-headers.headers.customResponseHeaders.X-Frame-Options=SAMEORIGIN"

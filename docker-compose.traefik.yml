@@ -10,6 +10,11 @@ services:
       - "443:443"
       # Dashboard (opcional, comentar en producción)
       - "8080:8080"
+    command:
+      # Cargar configuración desde archivo
+      - "--configFile=/traefik.yml"
+      # Sobrescribir email ACME desde variable de entorno
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
     volumes:
       # Socket Docker para auto-discovery
       - /var/run/docker.sock:/var/run/docker.sock:ro
