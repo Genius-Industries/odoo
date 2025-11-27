@@ -10,6 +10,9 @@ services:
       - "443:443"
       # Dashboard (opcional, comentar en producción)
       - "8080:8080"
+    environment:
+      # Configurar versión de API Docker (1.44 es el mínimo requerido)
+      - DOCKER_API_VERSION=1.44
     volumes:
       # Socket Docker para auto-discovery
       - /var/run/docker.sock:/var/run/docker.sock:ro
