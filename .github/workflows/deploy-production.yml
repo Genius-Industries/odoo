@@ -1,0 +1,225 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      restart_services:
+        description: 'Restart services after deployment'
+        required: false
+        default: 'true'
+        type: boolean
+
+jobs:
+  validate:
+    name: Pre-deployment Validation
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Validate docker-compose files
+        run: |
+          docker compose -f docker-compose.traefik.yml config > /dev/null
+          docker compose -f docker-compose.yml config > /dev/null
+          echo "✅ Docker compose files are valid"
+
+      - name: Check required files
+        run: |
+          required_files=("docker-compose.yml" "docker-compose.traefik.yml" "Makefile" "start.sh")
+          for file in "${required_files[@]}"; do
+            if [ ! -f "$file" ]; then
+              echo "❌ Missing required file: $file"
+              exit 1
+            fi
+          done
+          echo "✅ All required files present"
+
+      - name: Validate scripts syntax
+        run: |
+          bash -n start.sh
+          bash -n setup-env.sh
+          bash -n reset-deployment.sh
+          bash -n validate.sh
+          echo "✅ All scripts have valid syntax"
+
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    needs: validate
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run Trivy security scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'config'
+          scan-ref: '.'
+          format: 'table'
+          exit-code: '0'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Scan docker-compose files
+        run: |
+          echo "🔍 Scanning for sensitive data in configs..."
+          if grep -r "password.*=" docker-compose*.yml | grep -v "POSTGRES_PASSWORD"; then
+            echo "⚠️ Found hardcoded passwords"
+            exit 1
+          fi
+          echo "✅ No hardcoded credentials found"
+
+  deploy:
+    name: Deploy to Production Server
+    runs-on: ubuntu-latest
+    needs: [validate, security-scan]
+    environment: production
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to server
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+          ACME_EMAIL: ${{ secrets.ACME_EMAIL }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          TRAEFIK_DASHBOARD_AUTH: ${{ secrets.TRAEFIK_DASHBOARD_AUTH }}
+        run: |
+          echo "🚀 Deploying to production server..."
+
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            set -e
+
+            # Navigate to project directory
+            cd /opt/odoo || exit 1
+
+            # Pull latest changes
+            echo "📥 Pulling latest changes..."
+            git fetch origin
+            git reset --hard origin/main
+
+            # Update .env file with secrets
+            echo "⚙️ Updating environment variables..."
+            cat > .env << EOF
+          ODOO_VERSION=19.0
+          DOMAIN=$DOMAIN
+          POSTGRES_DB=odoo
+          POSTGRES_USER=odoo
+          POSTGRES_PASSWORD=$POSTGRES_PASSWORD
+          DB_HOST=db
+          ACME_EMAIL=$ACME_EMAIL
+          TRAEFIK_DASHBOARD_AUTH=$TRAEFIK_DASHBOARD_AUTH
+          TZ=America/Bogota
+          EOF
+
+            # Set proper permissions
+            chmod 600 .env
+            chmod 600 traefik/acme.json 2>/dev/null || touch traefik/acme.json && chmod 600 traefik/acme.json
+
+            # Create network if not exists
+            docker network create traefik-network 2>/dev/null || true
+
+            # Pull latest images
+            echo "📦 Pulling Docker images..."
+            docker compose -f docker-compose.traefik.yml pull
+            docker compose pull
+
+            # Deploy services
+            echo "🔄 Deploying services..."
+            docker compose -f docker-compose.traefik.yml up -d
+            sleep 5
+            docker compose up -d
+
+            echo "✅ Deployment completed!"
+          ENDSSH
+
+      - name: Wait for services to be healthy
+        run: |
+          echo "⏳ Waiting for services to be healthy..."
+          sleep 30
+
+      - name: Health check
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          DOMAIN: ${{ secrets.DOMAIN }}
+        run: |
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            # Check if containers are running
+            if ! docker ps | grep -q odoo_app; then
+              echo "❌ Odoo container is not running"
+              exit 1
+            fi
+
+            if ! docker ps | grep -q odoo_db; then
+              echo "❌ Database container is not running"
+              exit 1
+            fi
+
+            if ! docker ps | grep -q traefik; then
+              echo "❌ Traefik container is not running"
+              exit 1
+            fi
+
+            echo "✅ All containers are running"
+
+            # Check container health
+            docker ps --format "table {{.Names}}\t{{.Status}}"
+          ENDSSH
+
+          # Check HTTPS endpoint
+          echo "🔍 Checking HTTPS endpoint..."
+          sleep 10
+          if curl -f -s -o /dev/null -w "%{http_code}" https://$DOMAIN | grep -q "200\|302\|303"; then
+            echo "✅ HTTPS endpoint is accessible"
+          else
+            echo "⚠️ HTTPS endpoint returned unexpected status"
+          fi
+
+      - name: Restart services (optional)
+        if: ${{ github.event.inputs.restart_services == 'true' }}
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            cd /opt/odoo
+            docker compose restart
+            echo "🔄 Services restarted"
+          ENDSSH
+
+  notify:
+    name: Notify Deployment Status
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: always()
+
+    steps:
+      - name: Deployment Success
+        if: ${{ needs.deploy.result == 'success' }}
+        run: |
+          echo "🎉 Deployment to production completed successfully!"
+          echo "🌐 Application available at: https://${{ secrets.DOMAIN }}"
+
+      - name: Deployment Failed
+        if: ${{ needs.deploy.result != 'success' }}
+        run: |
+          echo "❌ Deployment failed. Check logs for details."
+          exit 1

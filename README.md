@@ -10,6 +10,7 @@ Configuración completa de Odoo con Traefik como reverse proxy, SSL automático 
 - **Módulos OCA**: Carpeta `addons/` lista para módulos personalizados
 - **SSL automático**: Certificados HTTPS gratuitos y renovación automática
 - **Docker Compose**: Orchestración simple y reproducible
+- **CI/CD**: GitHub Actions workflows para deploy, testing y backups
 - **Healthchecks**: Verificación de salud de servicios
 - **Networking aislado**: Seguridad entre servicios
 
@@ -107,24 +108,57 @@ odoo/
 ├── docker-compose.yml              # Odoo + PostgreSQL
 ├── docker-compose.traefik.yml      # Traefik
 ├── .env                            # Variables de entorno
-├── .env.example                    # Plantilla de configuración
 ├── Makefile                        # Comandos útiles
 ├── start.sh                        # Script de inicio
+├── setup-github-secrets.sh         # Configurar secrets para CI/CD
 ├── DEPLOYMENT.md                   # Guía completa de deployment
 ├── addons/                         # Módulos OCA
 ├── config/
 │   └── odoo.conf                   # Configuración Odoo
-└── traefik/
-    ├── traefik.yml                 # Config Traefik
-    ├── acme.json                   # Certificados SSL
-    └── dynamic/
-        └── middlewares.yml         # Seguridad
+├── traefik/
+│   ├── traefik.yml                 # Config Traefik
+│   ├── acme.json                   # Certificados SSL
+│   └── dynamic/
+│       └── middlewares.yml         # Seguridad
+└── .github/
+    ├── workflows/
+    │   ├── deploy-production.yml   # Deploy automático
+    │   ├── ci-testing.yml          # Tests y validación
+    │   ├── maintenance.yml         # Mantenimiento
+    │   └── backup.yml              # Backups automáticos
+    ├── WORKFLOWS.md                # Documentación workflows
+    └── SECRETS.md                  # Guía de secrets
 
 ```
+
+## CI/CD y Automatización
+
+### GitHub Actions Workflows
+
+Este proyecto incluye workflows automatizados para:
+
+- **Deploy to Production**: Deploy automático a producción en cada push a `main`
+- **CI/CD Testing**: Tests y validación en PRs y pushes
+- **Maintenance**: Mantenimiento diario y monitoreo
+- **Automated Backup**: Backups diarios de DB y volúmenes
+
+### Configurar CI/CD
+
+```bash
+# Opción A: Script interactivo (requiere GitHub CLI)
+./setup-github-secrets.sh
+
+# Opción B: Manual
+# Ver guía completa en .github/SECRETS.md
+```
+
+Ver documentación completa: **[.github/WORKFLOWS.md](./.github/WORKFLOWS.md)**
 
 ## Documentación
 
 - 📖 **[DEPLOYMENT.md](./DEPLOYMENT.md)**: Guía completa de instalación y configuración
+- 🚀 **[.github/WORKFLOWS.md](./.github/WORKFLOWS.md)**: Workflows de GitHub Actions
+- 🔐 **[.github/SECRETS.md](./.github/SECRETS.md)**: Configuración de secrets
 - 📋 **[CLAUDE.md](./CLAUDE.md)**: Reglas de desarrollo del proyecto
 
 ## Soporte

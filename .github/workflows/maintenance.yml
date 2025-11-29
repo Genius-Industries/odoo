@@ -1,0 +1,314 @@
+name: Maintenance & Monitoring
+
+on:
+  schedule:
+    # Run every day at 2:00 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      task:
+        description: 'Maintenance task to run'
+        required: true
+        type: choice
+        options:
+          - health-check
+          - update-images
+          - cleanup
+          - full-maintenance
+
+jobs:
+  health-check:
+    name: System Health Check
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.task == 'health-check' || github.event.inputs.task == 'full-maintenance' || github.event_name == 'schedule' }}
+
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Check container status
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "🔍 Checking container health..."
+
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            cd /opt/odoo
+
+            echo "📊 Container Status:"
+            docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}"
+
+            # Check if critical containers are running
+            containers=("odoo_app" "odoo_db" "traefik")
+            all_healthy=true
+
+            for container in "${containers[@]}"; do
+              if docker ps | grep -q "$container"; then
+                echo "✅ $container is running"
+              else
+                echo "❌ $container is NOT running"
+                all_healthy=false
+              fi
+            done
+
+            if [ "$all_healthy" = false ]; then
+              echo "⚠️ Some containers are not running!"
+              exit 1
+            fi
+
+            echo ""
+            echo "📊 Resource Usage:"
+            docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+
+            echo ""
+            echo "📊 Disk Usage:"
+            df -h | grep -E "Filesystem|/$"
+
+            echo ""
+            echo "📊 Docker Volumes:"
+            docker volume ls
+
+            echo "✅ Health check completed successfully"
+          ENDSSH
+
+      - name: Check HTTPS endpoint
+        env:
+          DOMAIN: ${{ secrets.DOMAIN }}
+        run: |
+          echo "🔍 Checking HTTPS endpoint..."
+
+          if curl -f -s -o /dev/null -w "%{http_code}" https://$DOMAIN | grep -q "200\|302\|303"; then
+            echo "✅ HTTPS endpoint is accessible"
+          else
+            echo "❌ HTTPS endpoint is not accessible"
+            exit 1
+          fi
+
+      - name: Check SSL certificate
+        env:
+          DOMAIN: ${{ secrets.DOMAIN }}
+        run: |
+          echo "🔍 Checking SSL certificate..."
+
+          cert_info=$(echo | openssl s_client -servername $DOMAIN -connect $DOMAIN:443 2>/dev/null | openssl x509 -noout -dates)
+
+          echo "$cert_info"
+
+          # Check if certificate is valid for at least 7 days
+          expiry_date=$(echo "$cert_info" | grep "notAfter" | cut -d= -f2)
+          expiry_epoch=$(date -d "$expiry_date" +%s)
+          current_epoch=$(date +%s)
+          days_until_expiry=$(( ($expiry_epoch - $current_epoch) / 86400 ))
+
+          if [ $days_until_expiry -lt 7 ]; then
+            echo "⚠️ SSL certificate expires in $days_until_expiry days!"
+          else
+            echo "✅ SSL certificate is valid (expires in $days_until_expiry days)"
+          fi
+
+  update-images:
+    name: Update Docker Images
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.task == 'update-images' || github.event.inputs.task == 'full-maintenance' || github.event_name == 'schedule' }}
+
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Pull latest images
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "📦 Updating Docker images..."
+
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            cd /opt/odoo
+
+            # Pull latest images
+            echo "📥 Pulling latest images..."
+            docker compose -f docker-compose.traefik.yml pull
+            docker compose pull
+
+            # Check if images were updated
+            echo "✅ Images updated successfully"
+
+            # Optional: Restart services with new images
+            # Uncomment the following lines if you want to auto-restart
+            # echo "🔄 Restarting services with updated images..."
+            # docker compose -f docker-compose.traefik.yml up -d
+            # docker compose up -d
+          ENDSSH
+
+  cleanup:
+    name: Cleanup Old Resources
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.task == 'cleanup' || github.event.inputs.task == 'full-maintenance' || github.event_name == 'schedule' }}
+
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Clean up Docker resources
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "🧹 Cleaning up Docker resources..."
+
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            echo "🗑️ Removing unused Docker images..."
+            docker image prune -a -f --filter "until=168h"
+
+            echo "🗑️ Removing unused Docker volumes..."
+            docker volume prune -f
+
+            echo "🗑️ Removing unused Docker networks..."
+            docker network prune -f
+
+            echo "🗑️ Removing stopped containers..."
+            docker container prune -f
+
+            echo ""
+            echo "📊 Disk space after cleanup:"
+            df -h | grep -E "Filesystem|/$"
+
+            echo "✅ Cleanup completed successfully"
+          ENDSSH
+
+  log-rotation:
+    name: Rotate and Archive Logs
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.task == 'full-maintenance' || github.event_name == 'schedule' }}
+
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Rotate logs
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "📝 Rotating Docker logs..."
+
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            cd /opt/odoo
+
+            # Archive old logs (older than 7 days)
+            find /var/lib/docker/containers -name "*.log" -mtime +7 -exec gzip {} \; 2>/dev/null || true
+
+            # Clean up very old archived logs (older than 30 days)
+            find /var/lib/docker/containers -name "*.log.gz" -mtime +30 -delete 2>/dev/null || true
+
+            echo "✅ Log rotation completed"
+          ENDSSH
+
+  backup-check:
+    name: Verify Backup System
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.task == 'full-maintenance' || github.event_name == 'schedule' }}
+
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Check backup directory
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "🔍 Checking backup system..."
+
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            cd /opt/odoo
+
+            # Check if backup directory exists
+            if [ ! -d "backups" ]; then
+              mkdir -p backups
+              echo "📁 Created backups directory"
+            fi
+
+            # List recent backups
+            echo "📦 Recent backups:"
+            ls -lh backups/ | tail -n 10
+
+            # Check backup age
+            latest_backup=$(ls -t backups/*.sql 2>/dev/null | head -n 1)
+            if [ -n "$latest_backup" ]; then
+              backup_age=$((($(date +%s) - $(stat -c %Y "$latest_backup")) / 86400))
+              echo "📅 Latest backup is $backup_age days old"
+
+              if [ $backup_age -gt 2 ]; then
+                echo "⚠️ Warning: Latest backup is older than 2 days!"
+              else
+                echo "✅ Backup system is up to date"
+              fi
+            else
+              echo "⚠️ No backups found!"
+            fi
+          ENDSSH
+
+  notify:
+    name: Send Maintenance Report
+    runs-on: ubuntu-latest
+    needs: [health-check, update-images, cleanup, log-rotation, backup-check]
+    if: always()
+
+    steps:
+      - name: Generate maintenance report
+        run: |
+          echo "📊 Maintenance Report"
+          echo "===================="
+          echo "Health Check: ${{ needs.health-check.result }}"
+          echo "Update Images: ${{ needs.update-images.result }}"
+          echo "Cleanup: ${{ needs.cleanup.result }}"
+          echo "Log Rotation: ${{ needs.log-rotation.result }}"
+          echo "Backup Check: ${{ needs.backup-check.result }}"
+
+          if [[ "${{ needs.health-check.result }}" == "failure" ]] || \
+             [[ "${{ needs.update-images.result }}" == "failure" ]] || \
+             [[ "${{ needs.cleanup.result }}" == "failure" ]]; then
+            echo ""
+            echo "⚠️ Some maintenance tasks failed. Please review the logs."
+            exit 1
+          else
+            echo ""
+            echo "✅ All maintenance tasks completed successfully"
+          fi

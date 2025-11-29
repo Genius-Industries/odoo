@@ -1,0 +1,283 @@
+name: Automated Backup
+
+on:
+  schedule:
+    # Run daily at 3:00 AM UTC
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      backup_type:
+        description: 'Type of backup to perform'
+        required: true
+        type: choice
+        options:
+          - database-only
+          - volumes-only
+          - full-backup
+
+jobs:
+  backup-database:
+    name: Backup PostgreSQL Database
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.backup_type == 'database-only' || github.event.inputs.backup_type == 'full-backup' || github.event_name == 'schedule' }}
+
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Create database backup
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "💾 Creating database backup..."
+
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            cd /opt/odoo
+
+            # Create backups directory if not exists
+            mkdir -p backups
+
+            # Generate timestamp
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+            BACKUP_FILE="backups/odoo_db_${TIMESTAMP}.sql"
+
+            # Create backup
+            echo "📦 Backing up PostgreSQL database..."
+            docker exec odoo_db pg_dump -U odoo odoo > "$BACKUP_FILE"
+
+            # Compress backup
+            gzip "$BACKUP_FILE"
+
+            # Check backup size
+            BACKUP_SIZE=$(du -h "${BACKUP_FILE}.gz" | cut -f1)
+            echo "✅ Backup created: ${BACKUP_FILE}.gz ($BACKUP_SIZE)"
+
+            # Keep only last 7 daily backups
+            echo "🗑️ Cleaning old backups (keeping last 7)..."
+            ls -t backups/odoo_db_*.sql.gz | tail -n +8 | xargs -r rm
+
+            echo "✅ Database backup completed successfully"
+          ENDSSH
+
+      - name: Download backup to runner (optional)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "📥 Downloading backup to runner..."
+
+          # Get latest backup filename
+          LATEST_BACKUP=$(ssh $SSH_USER@$SSH_HOST "ls -t /opt/odoo/backups/odoo_db_*.sql.gz | head -n 1")
+
+          # Download backup
+          mkdir -p ./backups
+          scp $SSH_USER@$SSH_HOST:$LATEST_BACKUP ./backups/
+
+          echo "✅ Backup downloaded to runner"
+
+      - name: Upload backup to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-backup-${{ github.run_number }}
+          path: ./backups/*.sql.gz
+          retention-days: 7
+
+  backup-volumes:
+    name: Backup Docker Volumes
+    runs-on: ubuntu-latest
+    if: ${{ github.event.inputs.backup_type == 'volumes-only' || github.event.inputs.backup_type == 'full-backup' || github.event_name == 'schedule' }}
+
+    steps:
+      - name: Setup SSH
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+      - name: Add server to known hosts
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H ${{ secrets.SSH_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Create volumes backup
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "💾 Creating volumes backup..."
+
+          ssh $SSH_USER@$SSH_HOST << 'ENDSSH'
+            cd /opt/odoo
+
+            # Create backups directory
+            mkdir -p backups
+
+            # Generate timestamp
+            TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+
+            # Backup Odoo data volume
+            echo "📦 Backing up Odoo data volume..."
+            docker run --rm \
+              -v odoo-web-data:/data \
+              -v $(pwd)/backups:/backup \
+              ubuntu tar czf /backup/odoo-data_${TIMESTAMP}.tar.gz /data
+
+            # Check backup size
+            BACKUP_SIZE=$(du -h "backups/odoo-data_${TIMESTAMP}.tar.gz" | cut -f1)
+            echo "✅ Odoo data backup created: odoo-data_${TIMESTAMP}.tar.gz ($BACKUP_SIZE)"
+
+            # Keep only last 7 volume backups
+            echo "🗑️ Cleaning old volume backups (keeping last 7)..."
+            ls -t backups/odoo-data_*.tar.gz | tail -n +8 | xargs -r rm
+
+            echo "✅ Volume backup completed successfully"
+          ENDSSH
+
+      - name: Download volume backup (optional)
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "📥 Downloading volume backup to runner..."
+
+          # Get latest backup filename
+          LATEST_BACKUP=$(ssh $SSH_USER@$SSH_HOST "ls -t /opt/odoo/backups/odoo-data_*.tar.gz | head -n 1")
+
+          # Download backup
+          mkdir -p ./backups
+          scp $SSH_USER@$SSH_HOST:$LATEST_BACKUP ./backups/
+
+          echo "✅ Volume backup downloaded to runner"
+
+      - name: Upload backup to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: volume-backup-${{ github.run_number }}
+          path: ./backups/*.tar.gz
+          retention-days: 7
+
+  backup-to-s3:
+    name: Upload Backup to S3
+    runs-on: ubuntu-latest
+    needs: [backup-database, backup-volumes]
+    if: ${{ (success() || needs.backup-database.result == 'success' || needs.backup-volumes.result == 'success') && vars.ENABLE_S3_BACKUP == 'true' }}
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./backups
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload to S3
+        env:
+          BACKUP_BUCKET: ${{ secrets.BACKUP_BUCKET }}
+        run: |
+          echo "☁️ Uploading backups to S3..."
+
+          # Upload all backups
+          aws s3 sync ./backups s3://$BACKUP_BUCKET/odoo-backups/$(date +%Y/%m/%d)/ \
+            --storage-class STANDARD_IA
+
+          echo "✅ Backups uploaded to S3"
+
+      - name: Clean old S3 backups
+        env:
+          BACKUP_BUCKET: ${{ secrets.BACKUP_BUCKET }}
+        run: |
+          echo "🗑️ Cleaning old S3 backups (keeping last 30 days)..."
+
+          # Delete backups older than 30 days
+          CUTOFF_DATE=$(date -d '30 days ago' +%Y-%m-%d)
+
+          aws s3 ls s3://$BACKUP_BUCKET/odoo-backups/ --recursive | \
+            while read -r line; do
+              FILE_DATE=$(echo $line | awk '{print $1}')
+              FILE_PATH=$(echo $line | awk '{print $4}')
+
+              if [[ "$FILE_DATE" < "$CUTOFF_DATE" ]]; then
+                echo "Deleting old backup: $FILE_PATH"
+                aws s3 rm s3://$BACKUP_BUCKET/$FILE_PATH
+              fi
+            done
+
+          echo "✅ Old backups cleaned"
+
+  verify-backup:
+    name: Verify Backup Integrity
+    runs-on: ubuntu-latest
+    needs: [backup-database]
+    if: ${{ needs.backup-database.result == 'success' }}
+
+    steps:
+      - name: Download database backup
+        uses: actions/download-artifact@v4
+        with:
+          name: database-backup-${{ github.run_number }}
+          path: ./backups
+
+      - name: Verify database backup
+        run: |
+          echo "🔍 Verifying database backup integrity..."
+
+          # Decompress backup
+          gunzip -c backups/*.sql.gz > /tmp/backup.sql
+
+          # Check if backup is valid SQL
+          if grep -q "PostgreSQL database dump" /tmp/backup.sql; then
+            echo "✅ Backup is a valid PostgreSQL dump"
+          else
+            echo "❌ Backup may be corrupted"
+            exit 1
+          fi
+
+          # Check backup size
+          BACKUP_SIZE=$(du -h /tmp/backup.sql | cut -f1)
+          echo "📊 Backup size: $BACKUP_SIZE"
+
+          if [ $(stat -c%s /tmp/backup.sql) -lt 1024 ]; then
+            echo "⚠️ Backup seems too small!"
+            exit 1
+          fi
+
+          echo "✅ Backup verification completed successfully"
+
+  notify:
+    name: Send Backup Report
+    runs-on: ubuntu-latest
+    needs: [backup-database, backup-volumes, verify-backup]
+    if: always()
+
+    steps:
+      - name: Generate backup report
+        run: |
+          echo "📊 Backup Report"
+          echo "==============="
+          echo "Date: $(date)"
+          echo "Database Backup: ${{ needs.backup-database.result }}"
+          echo "Volumes Backup: ${{ needs.backup-volumes.result }}"
+          echo "Verification: ${{ needs.verify-backup.result }}"
+
+          if [[ "${{ needs.backup-database.result }}" == "failure" ]] || \
+             [[ "${{ needs.backup-volumes.result }}" == "failure" ]] || \
+             [[ "${{ needs.verify-backup.result }}" == "failure" ]]; then
+            echo ""
+            echo "❌ Some backup tasks failed. Please review the logs."
+            exit 1
+          else
+            echo ""
+            echo "✅ All backup tasks completed successfully"
+          fi
