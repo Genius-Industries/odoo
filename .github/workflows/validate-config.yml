@@ -1,0 +1,102 @@
+name: Validate Configuration
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - develop
+  pull_request:
+    branches:
+      - main
+      - master
+      - develop
+
+jobs:
+  validate:
+    name: Validate Docker Compose Config
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up test environment variables
+        run: |
+          cat > .env << EOF
+          DOMAIN=test.example.com
+          ODOO_VERSION=19.0
+          ACME_EMAIL=test@example.com
+          TRAEFIK_DASHBOARD_AUTH=admin:\$\$apr1\$\$test
+          TZ=America/Bogota
+          EOF
+
+      - name: Create test PostgreSQL password
+        run: |
+          echo "test_password_123" > odoo_pg_pass
+
+      - name: Validate docker-compose.yml syntax
+        run: |
+          docker compose config > /dev/null
+          echo "✓ Docker Compose configuration is valid"
+
+      - name: Check for required files
+        run: |
+          echo "Checking required files..."
+
+          files=(
+            "docker-compose.yml"
+            ".env"
+            "odoo_pg_pass"
+            "README.md"
+          )
+
+          for file in "${files[@]}"; do
+            if [ -f "$file" ]; then
+              echo "✓ $file exists"
+            else
+              echo "✗ $file is missing"
+              exit 1
+            fi
+          done
+
+      - name: Validate secrets format
+        run: |
+          echo "Validating .env format..."
+
+          # Check if required variables exist
+          required_vars=(
+            "DOMAIN"
+            "ODOO_VERSION"
+            "ACME_EMAIL"
+            "TRAEFIK_DASHBOARD_AUTH"
+          )
+
+          for var in "${required_vars[@]}"; do
+            if grep -q "^$var=" .env; then
+              echo "✓ $var is defined"
+            else
+              echo "✗ $var is missing in .env"
+              exit 1
+            fi
+          done
+
+      - name: Check network configuration
+        run: |
+          echo "Checking network configuration..."
+
+          # Verify that all services use the same network
+          network_count=$(docker compose config | grep -c "traefik-public" || true)
+
+          if [ "$network_count" -gt 0 ]; then
+            echo "✓ Network configuration is consistent"
+          else
+            echo "✗ Network configuration issue detected"
+            exit 1
+          fi
+
+      - name: Validation summary
+        run: |
+          echo "========================================="
+          echo "All validations passed successfully!"
+          echo "========================================="

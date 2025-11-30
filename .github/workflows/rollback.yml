@@ -1,0 +1,87 @@
+name: Rollback Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      backup_date:
+        description: 'Backup date to restore (format: YYYYMMDD_HHMMSS)'
+        required: true
+        type: string
+
+jobs:
+  rollback:
+    name: Rollback to Previous Version
+    runs-on:
+      - self-hosted
+      - production
+
+    steps:
+      - name: Confirm rollback
+        run: |
+          echo "========================================="
+          echo "ROLLBACK INITIATED"
+          echo "========================================="
+          echo "Backup date: ${{ inputs.backup_date }}"
+          echo ""
+
+      - name: Stop current services
+        run: |
+          cd /home/geniusdev/WorkSpace/odoo
+          docker compose down
+
+      - name: Verify backup exists
+        run: |
+          BACKUP_FILE="/backups/odoo/odoo_backup_${{ inputs.backup_date }}.sql.gz"
+
+          if [ ! -f "$BACKUP_FILE" ]; then
+            echo "✗ Backup file not found: $BACKUP_FILE"
+            echo ""
+            echo "Available backups:"
+            ls -lh /backups/odoo/odoo_backup_*.sql.gz
+            exit 1
+          fi
+
+          echo "✓ Backup file found: $BACKUP_FILE"
+
+      - name: Restore database
+        run: |
+          cd /home/geniusdev/WorkSpace/odoo
+
+          # Start only database service
+          docker compose up -d db
+
+          # Wait for database to be ready
+          sleep 10
+
+          # Restore backup
+          BACKUP_FILE="/backups/odoo/odoo_backup_${{ inputs.backup_date }}.sql.gz"
+          gunzip -c "$BACKUP_FILE" | docker compose exec -T db psql -U odoo -d postgres
+
+          echo "✓ Database restored successfully"
+
+      - name: Restart all services
+        run: |
+          cd /home/geniusdev/WorkSpace/odoo
+          docker compose up -d
+
+      - name: Wait for services to be healthy
+        run: |
+          sleep 10
+
+          # Check PostgreSQL
+          cd /home/geniusdev/WorkSpace/odoo
+          docker compose exec -T db pg_isready -U odoo -d postgres || exit 1
+
+          echo "✓ Services are healthy after rollback"
+
+      - name: Rollback summary
+        run: |
+          echo "========================================="
+          echo "Rollback completed successfully!"
+          echo "========================================="
+          echo ""
+          echo "Restored from: ${{ inputs.backup_date }}"
+          echo ""
+          echo "Services status:"
+          cd /home/geniusdev/WorkSpace/odoo
+          docker compose ps

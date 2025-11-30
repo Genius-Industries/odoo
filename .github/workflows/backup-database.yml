@@ -1,0 +1,65 @@
+name: Backup Database
+
+on:
+  schedule:
+    # Ejecutar diariamente a las 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Permite ejecutar manualmente
+
+jobs:
+  backup:
+    name: Backup PostgreSQL Database
+    runs-on:
+      - self-hosted
+      - production
+
+    steps:
+      - name: Create backup directory
+        run: |
+          mkdir -p /backups/odoo
+          chmod 700 /backups/odoo
+
+      - name: Backup PostgreSQL database
+        run: |
+          BACKUP_DATE=$(date +%Y%m%d_%H%M%S)
+          BACKUP_FILE="/backups/odoo/odoo_backup_${BACKUP_DATE}.sql"
+
+          cd /home/geniusdev/WorkSpace/odoo
+          docker compose exec -T db pg_dumpall -U odoo > "$BACKUP_FILE"
+
+          # Comprimir backup
+          gzip "$BACKUP_FILE"
+
+          echo "Backup created: ${BACKUP_FILE}.gz"
+          echo "BACKUP_FILE=${BACKUP_FILE}.gz" >> $GITHUB_ENV
+
+      - name: Verify backup integrity
+        run: |
+          if [ -f "$BACKUP_FILE" ]; then
+            size=$(du -h "$BACKUP_FILE" | cut -f1)
+            echo "✓ Backup created successfully: $size"
+          else
+            echo "✗ Backup failed"
+            exit 1
+          fi
+
+      - name: Clean old backups
+        run: |
+          # Mantener solo los últimos 7 backups
+          cd /backups/odoo
+          ls -t odoo_backup_*.sql.gz | tail -n +8 | xargs -r rm
+
+          echo "Old backups cleaned. Current backups:"
+          ls -lh odoo_backup_*.sql.gz
+
+      - name: Backup summary
+        run: |
+          echo "========================================="
+          echo "Backup completed successfully!"
+          echo "========================================="
+          echo ""
+          echo "Backup file: $BACKUP_FILE"
+          echo "Location: /backups/odoo/"
+          echo ""
+          echo "Available backups:"
+          ls -lh /backups/odoo/odoo_backup_*.sql.gz

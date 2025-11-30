@@ -1,82 +1,140 @@
+version: "3.8"
+
 services:
+  traefik:
+    image: traefik:v3.6.2
+    container_name: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "80:80"
+      - "443:443"
+      # Dashboard (opcional, comentar en producción si no se usa)
+      - "8080:8080"
+    command:
+      # API y Dashboard
+      - "--api.dashboard=true"
+      - "--api.insecure=true"
+
+      # Logs
+      - "--log.level=INFO"
+      - "--accesslog=true"
+
+      # Entry points
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.web.http.redirections.entrypoint.to=websecure"
+      - "--entrypoints.web.http.redirections.entrypoint.scheme=https"
+      - "--entrypoints.websecure.address=:443"
+
+      # Docker provider
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--providers.docker.network=traefik-public"
+
+      # Let's Encrypt
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/acme.json"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-acme:/acme.json
+    networks:
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+
+      # Dashboard
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard.tls=true"
+      - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth"
+
+      # Autenticación básica para dashboard
+      - "traefik.http.middlewares.traefik-auth.basicauth.users=${TRAEFIK_DASHBOARD_AUTH}"
+
   db:
     image: postgres:15
-    container_name: odoo_db
+    container_name: odoo-db
     restart: unless-stopped
     environment:
-      - POSTGRES_DB=${POSTGRES_DB:-odoo}
-      - POSTGRES_USER=${POSTGRES_USER:-odoo}
-      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=odoo
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgresql_password
       - PGDATA=/var/lib/postgresql/data/pgdata
     volumes:
       - odoo-db-data:/var/lib/postgresql/data/pgdata
     networks:
-      - odoo-network
+      - traefik-public
+    secrets:
+      - postgresql_password
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-odoo}"]
+      test: ["CMD-SHELL", "pg_isready -U odoo -d postgres"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   odoo:
-    image: odoo:${ODOO_VERSION:-17.0}
-    container_name: odoo_app
+    image: odoo:${ODOO_VERSION}
+    container_name: odoo-web
     restart: unless-stopped
     depends_on:
       db:
         condition: service_healthy
     environment:
-      - HOST=${DB_HOST:-db}
-      - USER=${POSTGRES_USER:-odoo}
-      - PASSWORD=${POSTGRES_PASSWORD}
+      - HOST=db
+      - USER=odoo
+      - PASSWORD_FILE=/run/secrets/postgresql_password
     volumes:
       - odoo-web-data:/var/lib/odoo
-      - ./addons:/mnt/extra-addons
       - ./config:/etc/odoo
+      - ./addons:/mnt/extra-addons
     networks:
-      - odoo-network
-      - traefik-network
+      - traefik-public
+    secrets:
+      - postgresql_password
     labels:
       - "traefik.enable=true"
-      - "traefik.docker.network=traefik-network"
 
-      # HTTP Router - Web Interface
-      - "traefik.http.routers.odoo.rule=Host(`${DOMAIN}`)"
+      # Router HTTP -> HTTPS redirect
+      - "traefik.http.routers.odoo-http.rule=Host(`odoo.${DOMAIN}`)"
+      - "traefik.http.routers.odoo-http.entrypoints=web"
+      - "traefik.http.routers.odoo-http.middlewares=odoo-redirect"
+
+      # Router HTTPS
+      - "traefik.http.routers.odoo.rule=Host(`odoo.${DOMAIN}`)"
       - "traefik.http.routers.odoo.entrypoints=websecure"
       - "traefik.http.routers.odoo.tls=true"
       - "traefik.http.routers.odoo.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.odoo.service=odoo-web"
 
-      # Service - Web Interface
-      - "traefik.http.services.odoo-web.loadbalancer.server.port=8069"
+      # Service
+      - "traefik.http.services.odoo.loadbalancer.server.port=8069"
 
-      # Router - Longpolling (para chat en tiempo real de Odoo)
-      - "traefik.http.routers.odoo-longpolling.rule=Host(`${DOMAIN}`) && PathPrefix(`/longpolling`)"
-      - "traefik.http.routers.odoo-longpolling.entrypoints=websecure"
-      - "traefik.http.routers.odoo-longpolling.tls=true"
-      - "traefik.http.routers.odoo-longpolling.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.odoo-longpolling.service=odoo-polling"
-      - "traefik.http.routers.odoo-longpolling.priority=100"
+      # Middlewares
+      - "traefik.http.middlewares.odoo-redirect.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.odoo-redirect.redirectscheme.permanent=true"
 
-      # Service - Longpolling
-      - "traefik.http.services.odoo-polling.loadbalancer.server.port=8072"
-
-      # Middlewares para seguridad
-      - "traefik.http.middlewares.odoo-headers.headers.customResponseHeaders.X-Frame-Options=SAMEORIGIN"
-      - "traefik.http.middlewares.odoo-headers.headers.customResponseHeaders.X-Content-Type-Options=nosniff"
-      - "traefik.http.middlewares.odoo-headers.headers.sslRedirect=true"
-      - "traefik.http.routers.odoo.middlewares=odoo-headers@docker"
+      # Headers para mejor compatibilidad con Odoo
+      - "traefik.http.middlewares.odoo-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
+      - "traefik.http.middlewares.odoo-headers.headers.customrequestheaders.X-Forwarded-Host=odoo.${DOMAIN}"
+      - "traefik.http.routers.odoo.middlewares=odoo-headers"
 
 networks:
-  odoo-network:
-    name: odoo-network
+  traefik-public:
+    name: traefik-public
     driver: bridge
-  traefik-network:
-    name: traefik-network
-    external: true
 
 volumes:
   odoo-web-data:
     name: odoo-web-data
   odoo-db-data:
     name: odoo-db-data
+  traefik-acme:
+    name: traefik-acme
+
+secrets:
+  postgresql_password:
+    file: odoo_pg_pass

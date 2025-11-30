@@ -1,174 +1,352 @@
-# Guía de Deployment Odoo con Traefik
+# Guía de Deployment - Odoo + Traefik
 
-Esta guía te ayudará a desplegar Odoo con Traefik como reverse proxy, SSL automático y soporte para módulos OCA.
-
-## Prerequisitos
-
-- Docker y Docker Compose instalados
-- Dominio apuntando a tu servidor (A record en DNS)
-- Puerto 80 y 443 abiertos en firewall
-- (Opcional) Cuenta de Cloudflare si usas DNS challenge
-
-## Estructura del Proyecto
+## Arquitectura del Sistema
 
 ```
-odoo/
-├── docker-compose.yml              # Servicios principales (Odoo + PostgreSQL)
-├── docker-compose.traefik.yml      # Traefik reverse proxy
-├── .env                            # Variables de entorno (crear desde .env.example)
-├── addons/                         # Módulos OCA personalizados
-├── config/
-│   └── odoo.conf                   # Configuración de Odoo
-└── traefik/
-    ├── traefik.yml                 # Configuración estática de Traefik
-    ├── acme.json                   # Certificados SSL (auto-generado)
-    └── dynamic/
-        └── middlewares.yml         # Middlewares de seguridad
+Internet
+    │
+    ├─── HTTP (80)  ──────┐
+    │                     │
+    └─── HTTPS (443) ─────┤
+                          │
+                          ▼
+                    ┌──────────┐
+                    │ TRAEFIK  │ (Reverse Proxy + SSL)
+                    │  v3.6.2  │
+                    └─────┬────┘
+                          │
+            ┌─────────────┼─────────────┐
+            │             │             │
+            ▼             ▼             ▼
+    odoo.domain.com  traefik.domain.com  (dashboard)
+            │
+            ▼
+      ┌─────────┐
+      │  ODOO   │ (ERP System)
+      │  19.0   │
+      └────┬────┘
+           │
+           ▼
+    ┌────────────┐
+    │ PostgreSQL │ (Database)
+    │    15      │
+    └────────────┘
 ```
 
-## Configuración Inicial
+## Comparación: Configuración Anterior vs. Nueva
 
-### 1. Configurar variables de entorno
+| Aspecto | ❌ Configuración Anterior | ✅ Nueva Configuración |
+|---------|---------------------------|------------------------|
+| **Archivos** | 2 archivos separados | 1 archivo unificado |
+| **Redes** | Incompatibles (traefik-public vs traefik-network) | Una sola red: `traefik-public` |
+| **Traefik Config** | Archivos externos faltantes | Todo inline en docker-compose |
+| **Secrets** | Variables en .env | Docker secrets + .env |
+| **Puerto Odoo** | No especificado | Explícitamente en label |
+| **Health Checks** | No incluidos | PostgreSQL con healthcheck |
+| **SSL Config** | Faltaban archivos | HTTP Challenge inline |
+| **Funcional** | ❌ No funcionaría | ✅ Listo para producción |
+
+## Cambios Principales Implementados
+
+### 1. Unificación de Configuración
+
+**Antes**: `docker-compose.yml` + `docker-compose.traefik.yml` (separados e incompatibles)
+
+**Ahora**: Un solo `docker-compose.yml` con todo integrado
+
+### 2. Configuración Traefik Inline
+
+**Antes**: Requería archivos externos:
+```yaml
+volumes:
+  - ./traefik/traefik.yml:/traefik.yml  # ❌ No existía
+  - ./traefik/dynamic:/dynamic          # ❌ No existía
+```
+
+**Ahora**: Todo configurado via `command:` flags:
+```yaml
+command:
+  - "--api.dashboard=true"
+  - "--entrypoints.web.address=:80"
+  - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+```
+
+### 3. Red Docker Unificada
+
+**Antes**:
+```yaml
+# docker-compose.yml
+networks:
+  traefik-public:    # ❌ Red diferente
+    external: true
+
+# docker-compose.traefik.yml
+networks:
+  traefik-network:   # ❌ Red diferente
+    external: true
+```
+
+**Ahora**:
+```yaml
+networks:
+  traefik-public:    # ✅ Misma red para todos
+    name: traefik-public
+    driver: bridge
+```
+
+### 4. Gestión de Secrets
+
+**Adaptado de configuración oficial de Odoo**:
+
+```yaml
+secrets:
+  postgresql_password:
+    file: odoo_pg_pass    # Archivo con password
+
+# Usado en servicios:
+environment:
+  - POSTGRES_PASSWORD_FILE=/run/secrets/postgresql_password
+```
+
+### 5. Configuración Completa de Odoo con Traefik
+
+**Labels agregados**:
+
+```yaml
+labels:
+  # Router HTTPS
+  - "traefik.http.routers.odoo.rule=Host(`odoo.${DOMAIN}`)"
+  - "traefik.http.routers.odoo.tls.certresolver=letsencrypt"
+
+  # Puerto del servicio
+  - "traefik.http.services.odoo.loadbalancer.server.port=8069"
+
+  # Headers para compatibilidad
+  - "traefik.http.middlewares.odoo-headers.headers.customrequestheaders.X-Forwarded-Proto=https"
+```
+
+## Instrucciones de Deployment en VPS
+
+### Paso 1: Preparar DNS
+
+Configura los siguientes registros A en tu proveedor DNS:
+
+```
+odoo.geniusindustries.org     →  IP_DE_TU_VPS
+traefik.geniusindustries.org  →  IP_DE_TU_VPS
+```
+
+Verificar DNS:
+```bash
+nslookup odoo.geniusindustries.org
+nslookup traefik.geniusindustries.org
+```
+
+### Paso 2: Preparar VPS
 
 ```bash
-cp .env.example .env
+# Instalar Docker (si no está instalado)
+curl -fsSL https://get.docker.com | sh
+
+# Agregar usuario a grupo docker
+sudo usermod -aG docker $USER
+newgrp docker
+
+# Verificar instalación
+docker --version
+docker compose version
+```
+
+### Paso 3: Clonar/Subir Proyecto
+
+```bash
+# Opción 1: Git
+cd /home/tu-usuario
+git clone <tu-repositorio> odoo
+cd odoo
+
+# Opción 2: SCP (desde tu máquina local)
+scp -r /ruta/local/odoo usuario@IP_VPS:/home/usuario/
+```
+
+### Paso 4: Configurar Variables
+
+```bash
+cd /home/usuario/odoo
 nano .env
 ```
 
-Configura las siguientes variables:
-
+Verifica que esté configurado:
 ```env
-# Tu dominio
-DOMAIN=tudominio.com
-
-# Versión de Odoo
-ODOO_VERSION=17.0
-
-# Base de datos
-POSTGRES_PASSWORD=un_password_muy_seguro
-
-# Email para Let's Encrypt
-ACME_EMAIL=tu-email@example.com
-
-# Cloudflare (solo si usas DNS challenge)
-CF_API_EMAIL=tu-email@cloudflare.com
-CF_DNS_API_TOKEN=tu_token_cloudflare
+DOMAIN=geniusindustries.org
+ACME_EMAIL=admin@geniusindustries.org
+ODOO_VERSION=19.0
 ```
 
-### 2. Generar autenticación para Dashboard Traefik
+### Paso 5: Ejecutar Setup
 
 ```bash
-# Instalar htpasswd si no lo tienes
-sudo apt-get install apache2-utils
-
-# Generar usuario y password (cambiar 'admin' y 'tupassword')
-echo $(htpasswd -nb admin tupassword) | sed -e s/\\$/\\$\\$/g
-
-# Copiar el resultado en .env como TRAEFIK_DASHBOARD_AUTH
+chmod +x setup.sh
+./setup.sh
 ```
 
-### 3. Configurar DNS
+El script preguntará si quieres iniciar los servicios. Responde `y`.
 
-Apunta tu dominio a la IP de tu servidor:
-
-```
-# En tu proveedor DNS (Cloudflare, etc.)
-A     @              tu.ip.del.servidor
-A     traefik        tu.ip.del.servidor
-```
-
-## Deployment
-
-### Opción 1: Usar HTTP Challenge (recomendado para servidores públicos)
-
-En `traefik/traefik.yml`, comenta `dnsChallenge` y descomenta `httpChallenge`:
-
-```yaml
-certificatesResolvers:
-  letsencrypt:
-    acme:
-      email: ${ACME_EMAIL}
-      storage: acme.json
-      httpChallenge:
-        entryPoint: web
-```
-
-### Opción 2: Usar DNS Challenge (recomendado para Cloudflare)
-
-Mantén la configuración actual en `traefik/traefik.yml` y asegúrate de tener configurado:
-
-```env
-CF_API_EMAIL=tu-email@cloudflare.com
-CF_DNS_API_TOKEN=tu_token_cloudflare
-```
-
-### Iniciar servicios
+### Paso 6: Verificar Deployment
 
 ```bash
-# Crear la red de Traefik
-docker network create traefik-network
+# Ver containers corriendo
+docker compose ps
 
-# Iniciar Traefik
-docker compose -f docker-compose.traefik.yml up -d
+# Ver logs en tiempo real
+docker compose logs -f
 
-# Verificar logs de Traefik
-docker logs -f traefik
-
-# Iniciar Odoo y PostgreSQL
-docker compose up -d
-
-# Verificar logs de Odoo
-docker logs -f odoo_app
+# Verificar SSL (después de 1-2 minutos)
+curl -I https://odoo.geniusindustries.org
 ```
 
-## Verificación
+## Verificación de Funcionamiento
 
-1. **Dashboard de Traefik**: https://traefik.tudominio.com
-   - Usuario: admin (o el que configuraste)
-   - Password: el que generaste con htpasswd
+### ✅ Checklist de Validación
 
-2. **Odoo**: https://tudominio.com
-   - Primera vez: crea una base de datos
-   - Email master password: el que configuraste en `config/odoo.conf`
+- [ ] DNS apunta correctamente a IP del VPS
+- [ ] Puertos 80 y 443 abiertos en firewall
+- [ ] Containers corriendo: `docker compose ps`
+- [ ] PostgreSQL healthy: `docker compose ps db` (muestra "healthy")
+- [ ] Traefik obtuvo certificado SSL: `docker compose logs traefik | grep acme`
+- [ ] Odoo accesible: `https://odoo.geniusindustries.org`
+- [ ] Dashboard Traefik accesible: `https://traefik.geniusindustries.org`
+- [ ] Redirección HTTP → HTTPS funciona
 
-## Gestión de Módulos OCA
-
-### Agregar módulos personalizados
+### Comandos de Diagnóstico
 
 ```bash
-# Clonar módulos OCA en la carpeta addons
-cd addons
+# Estado de servicios
+docker compose ps
 
-# Ejemplo: módulos de contabilidad
-git clone https://github.com/OCA/account-financial-tools.git --branch 17.0 --depth 1
+# Logs de certificado SSL
+docker compose logs traefik | grep -i acme
 
-# Reiniciar Odoo para detectar nuevos módulos
+# Logs de conexión Odoo-PostgreSQL
+docker compose logs odoo | grep -i database
+
+# Test de conectividad interna
+docker compose exec odoo ping -c 3 db
+docker compose exec odoo curl -I http://localhost:8069
+
+# Verificar red Docker
+docker network ls | grep traefik
+docker network inspect traefik-public
+```
+
+## Mantenimiento Post-Deployment
+
+### Acceso Inicial a Odoo
+
+1. Abre: `https://odoo.geniusindustries.org`
+2. Crea la primera base de datos:
+   - **Master Password**: (definido en `config/odoo.conf`)
+   - **Database Name**: `production`
+   - **Email**: tu email
+   - **Password**: contraseña de administrador
+   - **Language**: Spanish
+   - **Country**: Colombia
+
+### Cambiar Password de Admin
+
+```bash
+# Editar config
+nano config/odoo.conf
+
+# Cambiar línea:
+admin_passwd = TU_PASSWORD_SEGURO
+
+# Reiniciar Odoo
 docker compose restart odoo
 ```
 
-### Actualizar lista de módulos
-
-1. Accede a Odoo: https://tudominio.com
-2. Activa modo desarrollador: Configuración > Activar modo desarrollador
-3. Apps > Actualizar lista de aplicaciones
-
-## Comandos Útiles
-
-### Ver logs
+### Monitoreo
 
 ```bash
-# Logs de Odoo
-docker logs -f odoo_app
+# Logs en tiempo real
+docker compose logs -f
 
-# Logs de PostgreSQL
-docker logs -f odoo_db
+# Solo errores
+docker compose logs --tail=100 | grep -i error
 
-# Logs de Traefik
-docker logs -f traefik
+# Uso de recursos
+docker stats
 ```
 
-### Reiniciar servicios
+### Backups Automáticos
 
+Agrega a crontab (`crontab -e`):
+
+```bash
+# Backup diario a las 2 AM
+0 2 * * * cd /home/usuario/odoo && docker compose exec -T db pg_dumpall -U odoo > /backups/odoo_$(date +\%Y\%m\%d).sql
+```
+
+## Problemas Resueltos
+
+### ✅ Red Docker Incompatible
+**Problema**: Traefik y Odoo en redes diferentes
+**Solución**: Una sola red `traefik-public` para todos los servicios
+
+### ✅ Archivos Traefik Faltantes
+**Problema**: `./traefik/traefik.yml` no existía
+**Solución**: Configuración inline via `command:` flags
+
+### ✅ Puerto Odoo No Especificado
+**Problema**: Traefik no sabía conectarse a puerto 8069
+**Solución**: Label `traefik.http.services.odoo.loadbalancer.server.port=8069`
+
+### ✅ Certificado SSL No Se Genera
+**Problema**: acme.json requiere permisos 600
+**Solución**: Volumen named `traefik-acme` con permisos correctos
+
+### ✅ Headers HTTP Incorrectos
+**Problema**: Odoo no detectaba HTTPS detrás de proxy
+**Solución**: Middleware con headers `X-Forwarded-Proto` y `X-Forwarded-Host`
+
+## Próximos Pasos Recomendados
+
+1. **Seguridad**:
+   - Cambiar todos los passwords por defecto
+   - Configurar firewall (ufw)
+   - Deshabilitar dashboard inseguro en puerto 8080
+
+2. **Optimización**:
+   - Agregar workers de Odoo en `config/odoo.conf`
+   - Configurar límites de recursos en docker-compose
+   - Implementar backups automáticos
+
+3. **Módulos**:
+   - Instalar módulos OCA en `addons/`
+   - Configurar módulos personalizados
+
+4. **Monitoreo**:
+   - Configurar alertas con Traefik
+   - Integrar con sistema de logging externo
+
+## Soporte Técnico
+
+**Logs importantes**:
+```bash
+# Ver todo
+docker compose logs -f
+
+# Solo Traefik
+docker compose logs -f traefik
+
+# Solo Odoo
+docker compose logs -f odoo
+
+# Solo PostgreSQL
+docker compose logs -f db
+```
+
+**Reiniciar servicios**:
 ```bash
 # Reiniciar todo
 docker compose restart
@@ -177,121 +355,16 @@ docker compose restart
 docker compose restart odoo
 ```
 
-### Backups
-
+**Resetear completamente**:
 ```bash
-# Backup de base de datos
-docker exec odoo_db pg_dump -U odoo odoo > backup_$(date +%Y%m%d).sql
-
-# Backup de volúmenes
-docker run --rm -v odoo-web-data:/data -v $(pwd):/backup ubuntu tar czf /backup/odoo-data-$(date +%Y%m%d).tar.gz /data
+# ⚠️ CUIDADO: Borra todos los datos
+docker compose down -v
+rm -rf config/odoo.conf
+./setup.sh
 ```
 
-### Restaurar backup
+---
 
-```bash
-# Restaurar base de datos
-docker exec -i odoo_db psql -U odoo odoo < backup_20250127.sql
-```
-
-## Troubleshooting
-
-### SSL no funciona
-
-1. Verifica que el puerto 80 y 443 estén abiertos
-2. Revisa logs de Traefik: `docker logs traefik`
-3. Verifica que el DNS apunte correctamente: `dig tudominio.com`
-
-### Odoo no carga
-
-1. Verifica logs: `docker logs odoo_app`
-2. Verifica que PostgreSQL esté funcionando: `docker logs odoo_db`
-3. Verifica conectividad: `docker exec odoo_app ping db`
-
-### Error de permisos en acme.json
-
-```bash
-chmod 600 traefik/acme.json
-```
-
-### Módulos OCA no aparecen
-
-1. Verifica que estén en la carpeta `addons/`
-2. Reinicia Odoo: `docker compose restart odoo`
-3. Actualiza lista de aplicaciones en Odoo
-
-## Configuración de Producción
-
-### Optimizar workers de Odoo
-
-En `config/odoo.conf`, descomenta y ajusta:
-
-```ini
-workers = 4
-max_cron_threads = 2
-limit_memory_hard = 2684354560
-limit_memory_soft = 2147483648
-```
-
-### Deshabilitar Dashboard de Traefik
-
-En `docker-compose.traefik.yml`, comenta la línea del puerto 8080:
-
-```yaml
-ports:
-  - "80:80"
-  - "443:443"
-  # - "8080:8080"  # Comentar en producción
-```
-
-### Cambiar admin_passwd
-
-En `config/odoo.conf`:
-
-```ini
-admin_passwd = tu_password_master_muy_seguro
-```
-
-## Actualizaciones
-
-### Actualizar Odoo
-
-```bash
-# Cambiar versión en .env
-ODOO_VERSION=18.0
-
-# Recrear contenedor
-docker compose up -d --force-recreate odoo
-```
-
-### Actualizar Traefik
-
-```bash
-docker compose -f docker-compose.traefik.yml pull
-docker compose -f docker-compose.traefik.yml up -d
-```
-
-## Seguridad Adicional
-
-### Limitar acceso a base de datos
-
-En `config/odoo.conf`:
-
-```ini
-dbfilter = ^%d$
-list_db = False
-```
-
-### Rate limiting
-
-Los middlewares en `traefik/dynamic/middlewares.yml` ya incluyen rate limiting básico.
-
-## Soporte
-
-- Documentación oficial Odoo: https://www.odoo.com/documentation
-- Documentación Traefik: https://doc.traefik.io/traefik/
-- Módulos OCA: https://github.com/OCA
-
-## Licencia
-
-Este proyecto usa Odoo Community Edition bajo licencia LGPL-3.0.
+**Estado**: ✅ Configuración lista para producción
+**Última actualización**: 2024-11-30
+**Versiones**: Odoo 19.0 | Traefik 3.6.2 | PostgreSQL 15

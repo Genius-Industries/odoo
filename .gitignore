@@ -1,12 +1,16 @@
 .idea
+.vscode/
 
-# Environment variables
+# Secrets y configuración sensible
 .env
+odoo_pg_pass
+config/odoo.conf
 
 # Traefik certificates
 traefik/acme.json
 
-# Odoo addons (excepto .gitkeep)
+# Datos de Odoo
+odoo-data/
 addons/*
 !addons/.gitkeep
 
@@ -15,6 +19,7 @@ addons/*
 
 # Backups
 backups/
+backup_*
 *.sql
 *.sql.gz
 *.tar.gz
@@ -22,3 +27,8 @@ backups/
 # OS
 .DS_Store
 Thumbs.db
+
+# IDE
+*.swp
+*.swo
+*~

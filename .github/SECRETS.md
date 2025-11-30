@@ -1,235 +1,383 @@
 # GitHub Secrets Configuration
 
-Este documento describe cómo configurar los secrets necesarios para los workflows de GitHub Actions.
+Esta guía explica cómo configurar los secrets necesarios en GitHub para que los workflows funcionen correctamente.
 
-## 📋 Secrets Requeridos
-
-### 🔐 Server Access (Obligatorios)
-
-| Secret | Descripción | Ejemplo | Cómo obtener |
-|--------|-------------|---------|--------------|
-| `SSH_HOST` | IP o dominio del servidor de producción | `123.45.67.89` o `server.example.com` | Tu proveedor de hosting |
-| `SSH_USER` | Usuario SSH con permisos | `deploy` o `root` | Crear usuario dedicado recomendado |
-| `SSH_PRIVATE_KEY` | Llave privada SSH (completa) | `-----BEGIN OPENSSH PRIVATE KEY-----` | Ver sección "Generar SSH Key" |
-
-### 🌐 Environment Variables (Obligatorios)
-
-| Secret | Descripción | Ejemplo | Cómo obtener |
-|--------|-------------|---------|--------------|
-| `DOMAIN` | Dominio de producción | `odoo.geniusindustries.org` | Tu dominio registrado |
-| `ACME_EMAIL` | Email para Let's Encrypt | `admin@geniusindustries.org` | Email válido del administrador |
-| `POSTGRES_PASSWORD` | Contraseña de PostgreSQL | `SuperSecurePass123!` | Generar contraseña segura |
-| `TRAEFIK_DASHBOARD_AUTH` | Auth hash para Traefik | `admin:$$apr1$$xyz$$abc` | Ver sección "Generar Auth Hash" |
-
-### ☁️ Backup Storage (Opcionales - Solo si usas S3)
-
-| Secret | Descripción | Ejemplo | Cómo obtener |
-|--------|-------------|---------|--------------|
-| `AWS_ACCESS_KEY_ID` | AWS Access Key | `AKIAIOSFODNN7EXAMPLE` | AWS IAM Console |
-| `AWS_SECRET_ACCESS_KEY` | AWS Secret Key | `wJalrXUtnFEMI/K7MDENG/...` | AWS IAM Console |
-| `BACKUP_BUCKET` | Nombre del bucket S3 | `odoo-backups-prod` | Crear bucket en S3 |
-
-## 🔧 Configuración Paso a Paso
-
-### 1. Generar SSH Key
-
-En tu máquina local:
-
-```bash
-# Generar nueva llave SSH dedicada para deployment
-ssh-keygen -t ed25519 -C "github-actions-deploy" -f ~/.ssh/github_deploy_key
-
-# Copiar llave pública al servidor
-ssh-copy-id -i ~/.ssh/github_deploy_key.pub user@your-server.com
-
-# Mostrar llave privada (para copiar al secret)
-cat ~/.ssh/github_deploy_key
-```
-
-**IMPORTANTE**: Copia TODO el contenido de la llave privada, incluyendo:
-- `-----BEGIN OPENSSH PRIVATE KEY-----`
-- Todo el contenido
-- `-----END OPENSSH PRIVATE KEY-----`
-
-### 2. Generar Hash de Autenticación Traefik
-
-Opción A - Usando htpasswd (local):
-```bash
-# Instalar apache2-utils si no lo tienes
-sudo apt-get install apache2-utils
-
-# Generar hash (reemplaza 'admin' y 'tu_password')
-echo $(htpasswd -nb admin tu_password) | sed -e s/\\$/\\$\\$/g
-```
-
-Opción B - Usando generador online:
-1. Ir a: https://hostingcanada.org/htpasswd-generator/
-2. Usuario: `admin`
-3. Password: `tu_password_seguro`
-4. Copiar el hash generado
-5. **IMPORTANTE**: Duplicar cada signo `$` → `$$` para docker-compose
-
-Ejemplo:
-- Hash original: `admin:$apr1$xyz$abc`
-- Hash para secret: `admin:$$apr1$$xyz$$abc`
-
-### 3. Configurar Secrets en GitHub
-
-#### Método Web UI:
+## Acceder a Secrets en GitHub
 
 1. Ve a tu repositorio en GitHub
 2. Click en `Settings` → `Secrets and variables` → `Actions`
 3. Click en `New repository secret`
-4. Para cada secret:
-   - Nombre: Exactamente como aparece en la tabla (ej: `SSH_HOST`)
-   - Valor: El valor correspondiente
+
+---
+
+## Secrets Requeridos
+
+### 1. `DOMAIN`
+**Descripción**: Dominio principal de tu aplicación (sin subdominios)
+
+**Valor de ejemplo**:
+```
+geniusindustries.org
+```
+
+**Uso**: Se usa para construir las URLs de Odoo y Traefik
+- `odoo.${DOMAIN}` → `odoo.geniusindustries.org`
+- `traefik.${DOMAIN}` → `traefik.geniusindustries.org`
+
+---
+
+### 2. `ODOO_VERSION`
+**Descripción**: Versión de Odoo a usar
+
+**Valor de ejemplo**:
+```
+19.0
+```
+
+**Opciones válidas**: `17.0`, `18.0`, `19.0`
+
+---
+
+### 3. `ACME_EMAIL`
+**Descripción**: Email para Let's Encrypt (certificados SSL)
+
+**Valor de ejemplo**:
+```
+admin@geniusindustries.org
+```
+
+**Importante**: Let's Encrypt enviará notificaciones de renovación a este email.
+
+---
+
+### 4. `TRAEFIK_DASHBOARD_AUTH`
+**Descripción**: Credenciales de autenticación básica para el dashboard de Traefik
+
+**Cómo generarlo**:
+
+```bash
+# Opción 1: Con htpasswd (recomendado)
+echo $(htpasswd -nb admin tu_password) | sed -e s/\\$/\\$\\$/g
+
+# Opción 2: Online
+# Visita: https://hostingcanada.org/htpasswd-generator/
+# IMPORTANTE: Reemplaza $ por $$ en el resultado
+```
+
+**Valor de ejemplo**:
+```
+admin:$$apr1$$8g1nh0jm$$RGQwWvGMzjP3PsLd7qVe21
+```
+
+**Nota**: Los `$$` (doble dollar) son necesarios para escapar el carácter en GitHub Actions.
+
+---
+
+### 5. `POSTGRES_PASSWORD`
+**Descripción**: Password para PostgreSQL
+
+**Cómo generarlo**:
+```bash
+openssl rand -base64 32
+```
+
+**Valor de ejemplo**:
+```
+X7k9mPqL2vN8jRwT3yH6bF4sC1dE5gA9
+```
+
+**Seguridad**:
+- Mínimo 16 caracteres
+- Incluir mayúsculas, minúsculas, números y símbolos
+- No usar palabras del diccionario
+
+---
+
+### 6. `TZ` (Opcional)
+**Descripción**: Zona horaria para los containers
+
+**Valor de ejemplo**:
+```
+America/Bogota
+```
+
+**Zonas horarias comunes**:
+- `America/New_York`
+- `America/Chicago`
+- `America/Los_Angeles`
+- `Europe/Madrid`
+- `Europe/London`
+
+**Ver todas**: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
+
+---
+
+## Cómo Agregar Secrets
+
+### Método 1: GitHub UI (Recomendado)
+
+1. **Ir a Settings**:
+   ```
+   Tu Repositorio → Settings → Secrets and variables → Actions
+   ```
+
+2. **Agregar cada secret**:
+   - Click en `New repository secret`
+   - Name: `DOMAIN`
+   - Value: `geniusindustries.org`
    - Click en `Add secret`
 
-#### Método GitHub CLI:
+3. **Repetir para cada secret** listado arriba
+
+### Método 2: GitHub CLI
 
 ```bash
 # Instalar GitHub CLI si no lo tienes
 # https://cli.github.com/
 
-# Login
+# Autenticarte
 gh auth login
 
-# Configurar secrets
-gh secret set SSH_HOST --body "123.45.67.89"
-gh secret set SSH_USER --body "deploy"
-gh secret set SSH_PRIVATE_KEY < ~/.ssh/github_deploy_key
-gh secret set DOMAIN --body "odoo.geniusindustries.org"
-gh secret set ACME_EMAIL --body "admin@geniusindustries.org"
-gh secret set POSTGRES_PASSWORD --body "SuperSecurePass123!"
-gh secret set TRAEFIK_DASHBOARD_AUTH --body 'admin:$$apr1$$xyz$$abc'
+# Agregar secrets
+gh secret set DOMAIN -b "geniusindustries.org"
+gh secret set ODOO_VERSION -b "19.0"
+gh secret set ACME_EMAIL -b "admin@geniusindustries.org"
+gh secret set TRAEFIK_DASHBOARD_AUTH -b "admin:\$\$apr1\$\$..."
+gh secret set POSTGRES_PASSWORD -b "$(openssl rand -base64 32)"
+gh secret set TZ -b "America/Bogota"
 ```
-
-### 4. Configurar Environment (Opcional pero Recomendado)
-
-Para mayor seguridad, configura un environment de producción:
-
-1. Ve a `Settings` → `Environments`
-2. Click en `New environment`
-3. Nombre: `production`
-4. Configurar:
-   - ✅ Required reviewers (opcional): Requiere aprobación manual
-   - ✅ Wait timer (opcional): Espera X minutos antes de deploy
-   - ✅ Deployment branches: Solo desde `main`
-
-Los secrets de environment tienen precedencia sobre los del repositorio.
-
-## 🧪 Verificar Configuración
-
-### Opción 1: Workflow de Testing
-
-```bash
-# Los workflows de CI se ejecutarán automáticamente en PRs
-# Crear un PR de prueba para validar la configuración
-git checkout -b test/verify-workflows
-git push origin test/verify-workflows
-# Crear PR en GitHub
-```
-
-### Opción 2: Workflow Manual
-
-1. Ve a `Actions` en GitHub
-2. Selecciona `Maintenance & Monitoring`
-3. Click en `Run workflow`
-4. Selecciona `health-check`
-5. Click en `Run workflow`
-
-Si todo está configurado correctamente, el workflow debería:
-- ✅ Conectar por SSH
-- ✅ Verificar servicios
-- ✅ Completar sin errores
-
-## 🔒 Mejores Prácticas de Seguridad
-
-### SSH Key Management
-
-- ✅ **Usar llave dedicada**: Crea una llave específica para GitHub Actions
-- ✅ **Permisos mínimos**: El usuario SSH solo debe tener acceso a `/opt/odoo`
-- ✅ **Rotar llaves**: Cambia las llaves periódicamente (cada 90 días)
-- ❌ **No reutilizar**: No uses tu llave personal SSH
-
-### Password Security
-
-- ✅ **Contraseñas fuertes**: Mínimo 16 caracteres, mixtos
-- ✅ **Unique passwords**: Diferente para cada servicio
-- ✅ **Password manager**: Usa 1Password, Bitwarden, etc.
-- ❌ **No compartir**: Los secrets son secretos, no los compartas
-
-### Ejemplo de creación de usuario dedicado:
-
-```bash
-# En el servidor de producción
-sudo useradd -m -s /bin/bash deploy
-sudo usermod -aG docker deploy
-
-# Crear directorio .ssh
-sudo mkdir -p /home/deploy/.ssh
-sudo touch /home/deploy/.ssh/authorized_keys
-sudo chmod 700 /home/deploy/.ssh
-sudo chmod 600 /home/deploy/.ssh/authorized_keys
-
-# Agregar la llave pública
-echo "ssh-ed25519 AAAA... github-actions-deploy" | sudo tee -a /home/deploy/.ssh/authorized_keys
-
-# Configurar ownership
-sudo chown -R deploy:deploy /home/deploy/.ssh
-
-# Dar permisos sudo solo para docker (opcional)
-echo "deploy ALL=(ALL) NOPASSWD: /usr/bin/docker" | sudo tee /etc/sudoers.d/deploy
-```
-
-## 🐛 Troubleshooting
-
-### Error: "Permission denied (publickey)"
-
-**Causa**: La llave SSH no está configurada correctamente.
-
-**Solución**:
-1. Verifica que copiaste la llave PRIVADA completa al secret `SSH_PRIVATE_KEY`
-2. Verifica que la llave PÚBLICA está en `~/.ssh/authorized_keys` del servidor
-3. Verifica permisos: `chmod 700 ~/.ssh && chmod 600 ~/.ssh/authorized_keys`
-
-### Error: "Host key verification failed"
-
-**Causa**: El servidor no está en known_hosts.
-
-**Solución**: Los workflows ya incluyen `ssh-keyscan`, pero verifica que `SSH_HOST` sea correcto.
-
-### Error: Traefik dashboard auth failed
-
-**Causa**: Hash de autenticación mal formado.
-
-**Solución**: Asegúrate de duplicar todos los `$` → `$$` en el hash.
-
-### Workflow no se ejecuta
-
-**Causa**: Permisos de Actions no configurados.
-
-**Solución**:
-1. Ve a `Settings` → `Actions` → `General`
-2. En "Workflow permissions": Selecciona "Read and write permissions"
-3. ✅ "Allow GitHub Actions to create and approve pull requests"
-
-## 📚 Referencias
-
-- [GitHub Actions - Encrypted secrets](https://docs.github.com/en/actions/security-guides/encrypted-secrets)
-- [GitHub Environments](https://docs.github.com/en/actions/deployment/targeting-different-environments/using-environments-for-deployment)
-- [SSH Key Authentication](https://www.ssh.com/academy/ssh/key)
-- [htpasswd Generator](https://hostingcanada.org/htpasswd-generator/)
-
-## 🆘 Soporte
-
-Si tienes problemas:
-
-1. **Revisa los logs**: `Actions` → Selecciona el workflow fallido → Ver logs detallados
-2. **Verifica secrets**: Revisa que todos los secrets obligatorios estén configurados
-3. **Test local**: Prueba la conexión SSH manualmente desde tu máquina
-4. **Issues**: Abre un issue en el repositorio con los logs (sin secrets!)
 
 ---
 
-**Última actualización**: 2025-11-30
+## Verificar Secrets Configurados
+
+### GitHub UI
+
+1. Ve a `Settings` → `Secrets and variables` → `Actions`
+2. Deberías ver todos los secrets listados (sin ver sus valores)
+
+### GitHub CLI
+
+```bash
+gh secret list
+```
+
+**Output esperado**:
+```
+ACME_EMAIL               Updated 2024-11-30
+DOMAIN                   Updated 2024-11-30
+ODOO_VERSION            Updated 2024-11-30
+POSTGRES_PASSWORD       Updated 2024-11-30
+TRAEFIK_DASHBOARD_AUTH  Updated 2024-11-30
+TZ                      Updated 2024-11-30
+```
+
+---
+
+## Environment-Specific Secrets (Avanzado)
+
+Si quieres tener diferentes secrets para staging y producción:
+
+### 1. Crear Environments
+
+```
+Settings → Environments → New environment
+```
+
+Crea:
+- `production`
+- `staging`
+
+### 2. Agregar Secrets al Environment
+
+En cada environment, agrega los secrets específicos:
+
+**Production**:
+- `DOMAIN` = `geniusindustries.org`
+
+**Staging**:
+- `DOMAIN` = `staging.geniusindustries.org`
+
+### 3. Usar en Workflows
+
+```yaml
+jobs:
+  deploy:
+    environment: production  # o staging
+```
+
+---
+
+## Seguridad de Secrets
+
+### ✅ Buenas Prácticas
+
+1. **Nunca commits secrets en código**
+   - Usa `.gitignore` para archivos sensibles
+   - Revisa commits antes de push
+
+2. **Rota secrets regularmente**
+   - Cambia passwords cada 90 días
+   - Actualiza secrets en GitHub cuando cambies
+
+3. **Principio de mínimo privilegio**
+   - Solo agrega secrets necesarios
+   - Usa environment-specific secrets cuando sea posible
+
+4. **Audita acceso**
+   - Revisa quién tiene acceso al repositorio
+   - Limita acceso a Settings
+
+### ❌ Evitar
+
+1. ❌ No hacer echo de secrets en logs
+   ```yaml
+   # MAL
+   - run: echo "Password is ${{ secrets.POSTGRES_PASSWORD }}"
+
+   # BIEN
+   - run: echo "Password configured"
+   ```
+
+2. ❌ No usar secrets en PRs de forks
+   - GitHub no expone secrets a PRs de forks por seguridad
+
+3. ❌ No usar valores por defecto débiles
+   - No uses `admin`, `password123`, etc.
+
+---
+
+## Testing de Secrets
+
+Para verificar que los secrets funcionan sin exponerlos:
+
+```yaml
+- name: Verify secrets are set
+  run: |
+    echo "Checking secrets..."
+
+    if [ -z "${{ secrets.DOMAIN }}" ]; then
+      echo "✗ DOMAIN secret is not set"
+      exit 1
+    fi
+    echo "✓ DOMAIN is set"
+
+    if [ -z "${{ secrets.POSTGRES_PASSWORD }}" ]; then
+      echo "✗ POSTGRES_PASSWORD secret is not set"
+      exit 1
+    fi
+    echo "✓ POSTGRES_PASSWORD is set"
+
+    # Repetir para cada secret...
+```
+
+---
+
+## Troubleshooting
+
+### "Secret not found"
+
+**Problema**: Workflow falla con mensaje sobre secret no encontrado
+
+**Solución**:
+1. Verifica que el nombre del secret esté bien escrito (case-sensitive)
+2. Verifica que el secret existe en `Settings → Secrets`
+3. Si usas environments, verifica que el secret esté en el environment correcto
+
+### "Invalid secret format"
+
+**Problema**: Secret tiene formato incorrecto (ej: `TRAEFIK_DASHBOARD_AUTH`)
+
+**Solución**:
+1. Verifica que usaste `$$` en lugar de `$` para escapar
+2. Regenera el hash de password correctamente
+
+### "Cannot access secrets in fork"
+
+**Problema**: PR desde fork no puede acceder a secrets
+
+**Solución**:
+- Esto es comportamiento esperado por seguridad
+- Los maintainers deben hacer merge primero
+- O ejecutar workflow manualmente después del merge
+
+---
+
+## Script Helper para Configurar Secrets
+
+Guarda este script como `setup-github-secrets.sh`:
+
+```bash
+#!/bin/bash
+
+echo "GitHub Secrets Setup Helper"
+echo "============================"
+echo ""
+
+# Verificar gh CLI
+if ! command -v gh &> /dev/null; then
+    echo "GitHub CLI no encontrado. Instálalo desde: https://cli.github.com/"
+    exit 1
+fi
+
+# Autenticación
+echo "Verificando autenticación..."
+gh auth status || gh auth login
+
+# DOMAIN
+read -p "Enter DOMAIN (e.g., geniusindustries.org): " domain
+gh secret set DOMAIN -b "$domain"
+
+# ODOO_VERSION
+read -p "Enter ODOO_VERSION (17.0, 18.0, 19.0): " odoo_version
+gh secret set ODOO_VERSION -b "$odoo_version"
+
+# ACME_EMAIL
+read -p "Enter ACME_EMAIL: " acme_email
+gh secret set ACME_EMAIL -b "$acme_email"
+
+# POSTGRES_PASSWORD
+echo "Generating POSTGRES_PASSWORD..."
+postgres_pass=$(openssl rand -base64 32)
+gh secret set POSTGRES_PASSWORD -b "$postgres_pass"
+echo "Password generated and saved"
+
+# TZ
+read -p "Enter TZ (e.g., America/Bogota): " tz
+gh secret set TZ -b "$tz"
+
+# TRAEFIK_DASHBOARD_AUTH
+echo ""
+echo "For TRAEFIK_DASHBOARD_AUTH, generate it at:"
+echo "https://hostingcanada.org/htpasswd-generator/"
+echo "Remember to replace \$ with \$\$"
+read -p "Enter TRAEFIK_DASHBOARD_AUTH: " traefik_auth
+gh secret set TRAEFIK_DASHBOARD_AUTH -b "$traefik_auth"
+
+echo ""
+echo "✓ All secrets configured!"
+echo ""
+echo "Verify with: gh secret list"
+```
+
+Ejecutar:
+```bash
+chmod +x setup-github-secrets.sh
+./setup-github-secrets.sh
+```
+
+---
+
+## Resumen
+
+**Secrets mínimos requeridos**:
+1. ✅ `DOMAIN`
+2. ✅ `ODOO_VERSION`
+3. ✅ `ACME_EMAIL`
+4. ✅ `TRAEFIK_DASHBOARD_AUTH`
+5. ✅ `POSTGRES_PASSWORD`
+6. ⚠️ `TZ` (opcional, por defecto UTC)
+
+**Total**: 5-6 secrets
+
+Una vez configurados, los workflows podrán ejecutarse automáticamente con deployment seguro.
